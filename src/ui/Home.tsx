@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Departure, Mode, Place } from '../engine/model';
 import type { LatLon } from '../engine/geo';
+import { distM } from '../engine/geo';
 import { api, NearbyStop } from '../api';
 import { useSaved } from '../store';
 import type { Scene } from './MapView';
@@ -33,10 +34,16 @@ export default function Home({ me, geoError, setScene, go }: Props) {
   const [near, setNear] = useState<NearbyStop[] | null>(null);
   const [deps, setDeps] = useState<Record<number, Departure[]>>({});
   const now = useNowSec();
-  const meKey = me ? `${me[0].toFixed(3)},${me[1].toFixed(3)}` : '';
+  // only refresh nearby stops when the user really moved (GPS jitters constantly)
+  const [anchor, setAnchor] = useState<LatLon | null>(me);
+  useEffect(() => {
+    if (me && (!anchor || distM(anchor[0], anchor[1], me[0], me[1]) > 150)) setAnchor(me);
+  }, [me]);
+  const meKey = anchor ? `${anchor[0].toFixed(4)},${anchor[1].toFixed(4)}` : '';
 
   useEffect(() => {
-    if (!me) return;
+    if (!anchor) return;
+    const me = anchor;
     let alive = true;
     api.nearbyStops(me[0], me[1], 600, 10).then((r) => {
       if (!alive) return;

@@ -413,6 +413,9 @@ export class Planner {
     // Second pass with a stricter driving limit -> "less driving" alternative
     const ctx2 = { ...ctx, eg: ctx.eg.filter((e) => { const i = ctx.egInfo[e.tag]; return i.kind === 'walk' || i.driveFromDriverSec <= maxSec * 0.55; }) };
     results.push(...this.run(ctx2).map((r) => this.build(ctx2, r)));
+    // car-only pass: guarantees a plan that actually uses the driver, even when the bus reaches the door
+    const ctx3 = { ...ctx, eg: ctx.eg.filter((e) => ctx.egInfo[e.tag].kind === 'car') };
+    results.push(...this.run(ctx3).map((r) => this.build(ctx3, r)));
     // the driver could also come all the way to me
     const direct = await this.directCar(from, driver, to, sec, maxSec, factor, 'pickup', date, lambda);
     if (direct) results.push(direct);
@@ -506,10 +509,14 @@ export class Planner {
         ctx.acc.push({ stop: s, time: sec + HANDOVER + d, tag: ctx.accInfo.length - 1 });
       }
       this.addWalkEgress(ctx, to);
-      for (const r of this.run(ctx)) {
-        const it = this.build(ctx, r);
-        it.cost = it.arr - sec + lambda * carSec(it) * 2;
-        results.push(it);
+      // first pass also runs car-only, so a drop-off plan always exists to compare
+      const passes = frac === 1 ? [ctx, { ...ctx, acc: ctx.acc.filter((x) => ctx.accInfo[x.tag].kind === 'car') }] : [ctx];
+      for (const c of passes) {
+        for (const r of this.run(c)) {
+          const it = this.build(c, r);
+          it.cost = it.arr - sec + lambda * carSec(it) * 2;
+          results.push(it);
+        }
       }
     }
     const direct = await this.directCar(driver, driver, to, sec, maxSec, factor, 'dropoff', date, lambda);
@@ -730,7 +737,7 @@ export class Planner {
       const fastest = out.reduce((a, b) => (b.arr < a.arr ? b : a));
       if (fastest !== out[0]) fastest.tags.push('הכי מהיר');
       const leastDrive = out.reduce((a, b) => (carSec(b) < carSec(a) ? b : a));
-      if (leastDrive !== out[0] && leastDrive !== fastest && carSec(leastDrive) < carSec(out[0])) leastDrive.tags.push('פחות נהיגה');
+      if (leastDrive !== out[0] && leastDrive !== fastest && carSec(leastDrive) > 0 && carSec(leastDrive) < carSec(out[0])) leastDrive.tags.push('פחות נהיגה');
     }
     return out;
   }

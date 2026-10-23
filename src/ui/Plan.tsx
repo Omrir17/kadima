@@ -4,6 +4,7 @@ import type { LatLon } from '../engine/geo';
 import { api } from '../api';
 import { addRecent, updateSaved, useSaved } from '../store';
 import { hm } from '../engine/time';
+import { distM } from '../engine/geo';
 import type { Scene } from './MapView';
 import type { PickerOpts } from './PlacePicker';
 import { ME_NAME } from './PlacePicker';
@@ -69,7 +70,14 @@ export default function Plan({ init, me, openPicker, setScene, onOpenTrip, onMod
   const gen = useRef(0);
   const now = useNowSec(resp?.date);
 
-  const meP: Place | null = me ? { name: ME_NAME, lat: me[0], lon: me[1] } : null;
+  // Lock "my location" for planning: GPS jitters every few seconds, which would re-run the search.
+  // Only move the anchor when the user has really moved (~200 m).
+  const [anchor, setAnchor] = useState<LatLon | null>(me);
+  useEffect(() => {
+    if (!me) return;
+    if (!anchor || distM(anchor[0], anchor[1], me[0], me[1]) > 200) setAnchor(me);
+  }, [me]);
+  const meP: Place | null = useMemo(() => (anchor ? { name: ME_NAME, lat: anchor[0], lon: anchor[1] } : null), [anchor]);
   const fromP = from ?? meP;
   const destP = to;
   const driverP = mode === 'pickup' ? (driver ?? saved.home ?? to ?? null) : mode === 'dropoff' ? (driver ?? fromP) : null;
@@ -102,7 +110,7 @@ export default function Plan({ init, me, openPicker, setScene, onOpenTrip, onMod
     }
   }, [mode, fromP?.lat, fromP?.lon, destP, driverP?.lat, driverP?.lon, maxDrive, lambda, rideDest, detour, waze, timeKind, timeMs, busSel, nextPos, st.prefs,
     // me only matters at ~100m resolution
-    me ? me[0].toFixed(3) + me[1].toFixed(3) : '']);
+    meP]);
 
   const reqKey = req ? JSON.stringify({ ...req, from: req.from && [req.from.lat.toFixed(3), req.from.lon.toFixed(3)] }) : '';
 
@@ -156,7 +164,7 @@ export default function Plan({ init, me, openPicker, setScene, onOpenTrip, onMod
     let alive = true;
     setBusBusy(true);
     const t = setTimeout(() => {
-      api.findBuses(q, me).then((c) => {
+      api.findBuses(q, anchor).then((c) => {
         if (!alive) return;
         setBusCands(c);
         setBusBusy(false);
@@ -290,9 +298,10 @@ export default function Plan({ init, me, openPicker, setScene, onOpenTrip, onMod
       </div>
 
       {!fromP && mode !== 'onbus' && mode !== 'dropoff' && <p className="muted pad">צריך לאשר גישה למיקום, או לבחור נקודת מוצא.</p>}
-      {busy && <Spinner label={mode === 'pickup' || mode === 'dropoff' ? 'בודק זמני נסיעה ברכב…' : 'מחשב מסלולים…'} />}
+      {busy && !resp && <Spinner label={mode === 'pickup' || mode === 'dropoff' ? 'בודק זמני נסיעה ברכב…' : 'מחשב מסלולים…'} />}
+      {busy && resp && <p className="muted small refreshing">מעדכן…</p>}
       {error && <Empty title="משהו השתבש">{error}</Empty>}
-      {!busy && resp && (
+      {resp && (
         <div className="results">
           {resp.baseline && (
             <div className="baseline">בלי נהג: הגעה ב-<b>{hm(resp.baseline.arr)}</b> בתחבורה ציבורית בלבד</div>
