@@ -76,6 +76,7 @@ export function ItinCard({ it, now, onClick, baseline }: { it: Itinerary; now: n
       </div>
       <LegChips it={it} />
       {head && <div className="itin-car">{head}</div>}
+      {it.legs.map((l) => l.car?.warn).filter(Boolean).map((w, i) => <div key={i} className="warn">{w}</div>)}
       <div className="itin-meta">
         {firstTransit?.onBus ? <span>להישאר באוטובוס עד {firstTransit.to.name}</span>
           : leaveIn > 0 ? <span>{leaveIn < 60 ? `יציאה בעוד ${leaveIn} דק'` : `יציאה ב-${hm(it.dep)}`}</span>

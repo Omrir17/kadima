@@ -4,7 +4,8 @@ import { Access, Egress, Raptor, RawLeg, RoundResult } from './raptor';
 import {
   BusCandidate, Departure, Itinerary, Leg, LineVariant, Place, PlanRequest, PlanResponse, Prefs, StopRef, VehicleView,
 } from './model';
-import { epochToDaySec, israelParts, trafficFactor } from './time';
+import { daySecToEpoch, epochToDaySec, israelParts, trafficFactor } from './time';
+import { trafficRoute } from '../services/tomtom';
 import { estDriveSec, osrmOneToMany, osrmRoute } from '../services/osrm';
 import { Vehicle, vehiclesForRoute, vehiclesForRoutes } from '../services/live';
 import { lineColor } from './operators';
@@ -415,9 +416,11 @@ export class Planner {
     // the driver could also come all the way to me
     const direct = await this.directCar(from, driver, to, sec, maxSec, factor, 'pickup', date, lambda);
     if (direct) results.push(direct);
-    const its = this.rankFlexible(results, 4);
+    let its = this.rankFlexible(results, 5);
+    const traffic = await this.applyTraffic(its, req, sec, date, maxSec, lambda);
+    its = this.retag(its, 4, (it) => it.arr + lambda * carSec(it));
     const baseline = await this.baseline(req, from, to);
-    return { date, itineraries: its, baseline, approx: field.approx };
+    return { date, itineraries: its, baseline, approx: field.approx && traffic !== 'on', traffic };
   }
 
   private async directCar(from: Place, driver: Place, to: Place, t0: number, maxSec: number, factor: number, role: 'pickup' | 'dropoff', date: string, lambda: number): Promise<Itinerary | null> {
@@ -511,9 +514,11 @@ export class Planner {
     }
     const direct = await this.directCar(driver, driver, to, sec, maxSec, factor, 'dropoff', date, lambda);
     if (direct) { direct.cost = direct.arr - sec + lambda * carSec(direct) * 2; results.push(direct); }
-    const its = this.rankFlexible(results, 4);
+    let its = this.rankFlexible(results, 5);
+    const traffic = await this.applyTraffic(its, req, sec, date, maxSec, lambda);
+    its = this.retag(its, 4, (it) => it.arr + lambda * carSec(it));
     const baseline = await this.baseline(req, driver, to);
-    return { date, itineraries: its, baseline, approx: field.approx };
+    return { date, itineraries: its, baseline, approx: field.approx && traffic !== 'on', traffic };
   }
 
   // ---------------------------------------------------------------- mode: I'm riding with someone
@@ -613,8 +618,121 @@ export class Planner {
     }
     if (bestDirect) { bestDirect.tags.push('בלי תחבורה ציבורית'); results.push(bestDirect); }
     for (const it of results) it.cost = it.arr + (it.legs[0]?.car?.detourSec ?? 0) * 0.5;
-    const its = this.rankFlexible(results, 4);
-    return { date, itineraries: its, approx, note: req.wazeMin ? undefined : 'זמני הנסיעה מוערכים. אפשר לכייל לפי Waze.' };
+    let its = this.rankFlexible(results, 5);
+    // an explicit Waze time from the user wins over our traffic lookup
+    const traffic = req.wazeMin ? 'off' : await this.applyTraffic(its, req, sec, date, 0, 0);
+    its = this.retag(its, 4, (it) => it.arr + (it.legs[0]?.car?.detourSec ?? 0) * 0.5);
+    const note = req.wazeMin || traffic === 'on' ? undefined : 'זמני הנסיעה מוערכים. אפשר לכייל לפי Waze, או להוסיף מפתח TomTom בהגדרות.';
+    return { date, itineraries: its, approx: approx && traffic !== 'on', note, traffic };
+  }
+
+  // ---------------------------------------------------------------- traffic (TomTom)
+
+  /**
+   * Re-times the car legs of the shown itineraries with traffic-aware TomTom routes.
+   * Returns 'on' when applied, 'off' when no key, or an error message.
+   */
+  private async applyTraffic(its: Itinerary[], req: PlanRequest, t0: number, date: string, maxSec: number, _lambda?: number): Promise<string> {
+    const key = req.trafficKey?.trim();
+    if (!key) return 'off';
+    const at = (sec: number) => daySecToEpoch(sec, date);
+    const P = (p: Place): LatLon => [p.lat, p.lon];
+    try {
+      await Promise.all(its.map(async (it) => {
+        for (let i = 0; i < it.legs.length; i++) {
+          const leg = it.legs[i];
+          const c = leg.car;
+          if (!c) continue;
+          if (c.role === 'pickup') {
+            const driverFrom = c.driverFrom ?? leg.from;
+            if (it.legs.length === 1) {
+              // driver comes to me, then drives me to the destination
+              const a = await trafficRoute(key, [P(driverFrom), P(leg.from)], at(t0));
+              const b = await trafficRoute(key, [P(leg.from), P(leg.to)], at(t0 + a.sec));
+              leg.dep = t0 + a.sec;
+              leg.arr = leg.dep + b.sec;
+              c.driveSec = b.sec;
+              c.driverLeaves = t0;
+              c.driverTotalSec = a.sec + b.sec;
+              if (maxSec && a.sec > maxSec * 1.1) c.warn = `הנסיעה לנהג בפקקים: ${Math.round(a.sec / 60)} דק', יותר מהמגבלה`;
+            } else {
+              const meetAt = leg.dep - HANDOVER; // when I arrive at the stop
+              const out = await trafficRoute(key, [P(driverFrom), P(leg.from)], at(meetAt - (c.driverTotalSec ?? 0) / 2));
+              const back = await trafficRoute(key, [P(leg.from), P(leg.to)], at(leg.dep));
+              c.driverLeaves = meetAt - out.sec;
+              c.driveSec = back.sec;
+              c.driverTotalSec = out.sec + back.sec;
+              leg.arr = leg.dep + back.sec;
+              if (maxSec && out.sec > maxSec * 1.1) c.warn = `בפקקים הנסיעה לנהג היא ${Math.round(out.sec / 60)} דק', יותר מהמגבלה`;
+            }
+          } else if (c.role === 'dropoff') {
+            const r = await trafficRoute(key, [P(leg.from), P(leg.to)], at(Math.max(t0, leg.arr - c.driveSec)));
+            const next = it.legs[i + 1];
+            if (it.legs.length === 1) {
+              leg.dep = t0;
+              leg.arr = t0 + r.sec;
+            } else {
+              const dep = leg.arr - r.sec;
+              if (dep < t0 - 60) {
+                // can't leave early enough in this traffic
+                leg.dep = t0;
+                leg.arr = t0 + r.sec;
+                c.warn = 'בגלל הפקקים יש סיכון לפספס את ההמשך';
+                if (next && next.kind === 'walk') { const d = next.arr - next.dep; next.dep = leg.arr; next.arr = leg.arr + d; }
+              } else leg.dep = dep;
+            }
+            c.driveSec = r.sec;
+            c.driverLeaves = leg.dep;
+            c.driverTotalSec = r.sec * 2;
+            if (maxSec && r.sec > maxSec * 1.1) c.warn = c.warn ?? `בפקקים הנסיעה היא ${Math.round(r.sec / 60)} דק', יותר מהמגבלה`;
+          } else if (c.role === 'ride') {
+            const r = await trafficRoute(key, [P(leg.from), P(leg.to)], at(t0));
+            const rideDest = req.rideDest;
+            if (c.detourSec && rideDest) {
+              const direct = await trafficRoute(key, [P(leg.from), P(rideDest)], at(t0));
+              const via = await trafficRoute(key, [P(leg.from), P(leg.to), P(rideDest)], at(t0));
+              c.detourSec = Math.max(0, via.sec - direct.sec);
+            }
+            leg.arr = t0 + r.sec;
+            c.driveSec = r.sec;
+            // shift the walk after getting out, then check the connection still works
+            let tReady = leg.arr + HANDOVER;
+            const next = it.legs[i + 1];
+            if (next && next.kind === 'walk') {
+              const d = next.arr - next.dep;
+              next.dep = tReady;
+              next.arr = tReady + d;
+              tReady = next.arr;
+            }
+            const transit = it.legs.slice(i + 1).find((l) => l.kind === 'transit');
+            if (transit && transit.dep < tReady) c.warn = `בפקקים עלול לפספס את קו ${transit.line} ב-${hmLocal(transit.dep)}`;
+          }
+          c.traffic = true;
+          c.approx = false;
+        }
+        it.dep = it.legs[0].dep;
+        it.arr = it.legs[it.legs.length - 1].arr;
+      }));
+      return 'on';
+    } catch (e: any) {
+      return String(e?.message || 'TomTom לא זמין');
+    }
+  }
+
+  /** Re-sort after traffic changed times and refresh the summary tags. */
+  private retag(its: Itinerary[], max: number, score: (it: Itinerary) => number) {
+    const strip = new Set(['מומלץ', 'הכי מהיר', 'פחות נהיגה']);
+    const warned = (it: Itinerary) => it.legs.some((l) => l.car?.warn);
+    const out = [...its].sort((a, b) => Number(warned(a)) - Number(warned(b)) || score(a) - score(b)).slice(0, max);
+    for (const it of out) it.tags = it.tags.filter((t) => !strip.has(t));
+    if (out.length) {
+      out[0].tags.push('מומלץ');
+      const fastest = out.reduce((a, b) => (b.arr < a.arr ? b : a));
+      if (fastest !== out[0]) fastest.tags.push('הכי מהיר');
+      const leastDrive = out.reduce((a, b) => (carSec(b) < carSec(a) ? b : a));
+      if (leastDrive !== out[0] && leastDrive !== fastest && carSec(leastDrive) < carSec(out[0])) leastDrive.tags.push('פחות נהיגה');
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------- mode: I'm already on a bus
@@ -962,6 +1080,11 @@ function mergeWalks(legs: Leg[], prefs: Prefs): Leg[] {
   }
   // drop negligible walks
   return out.filter((l, i) => !(l.kind === 'walk' && (l.dist ?? 0) < 25 && out.length > 1 && i > 0 && i < out.length - 1));
+}
+
+function hmLocal(sec: number) {
+  const m = Math.round(sec / 60);
+  return `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 }
 
 function carSec(it: Itinerary) {

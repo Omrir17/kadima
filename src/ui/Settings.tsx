@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import type { Place } from '../engine/model';
+import { testKey } from '../services/tomtom';
 import { getSaved, updateSaved, useSaved } from '../store';
 import type { PickerOpts } from './PlacePicker';
 import { IconClose, IconHome, IconStar, IconWork } from './icons';
@@ -33,6 +35,9 @@ export default function Settings({ openPicker, dataInfo }: Props) {
       <Seg label="ברירת מחדל לזמן נהיגה" value={st.driveMin} options={[[5, "5 דק'"], [10, "10 דק'"], [15, "15 דק'"], [20, "20 דק'"]]} onChange={(v) => setSt({ driveMin: v })} />
       <Seg label="עיקוף מקסימלי בטרמפ" value={st.detourMin} options={[[0, 'בלי'], [3, "3 דק'"], [5, "5 דק'"], [10, "10 דק'"]]} onChange={(v) => setSt({ detourMin: v })} />
 
+      <h2 className="sec-h">פקקים (TomTom)</h2>
+      <TrafficKey value={st.tomtomKey ?? ''} onSave={(k) => setSt({ tomtomKey: k || undefined })} />
+
       <h2 className="sec-h">התקנה באייפון</h2>
       <p className="muted">כדי שקדימה תיפתח כמו אפליקציה: בספארי, לחיצה על כפתור השיתוף ואז על "הוספה למסך הבית".</p>
 
@@ -40,7 +45,7 @@ export default function Settings({ openPicker, dataInfo }: Props) {
       <p className="muted small">
         לוחות זמנים: משרד התחבורה (GTFS){dataInfo ? `, עודכנו ${new Date(dataInfo.built).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}` : ''}.<br />
         מיקומי אוטובוסים: פרויקט "אוטובוס פתוח" של הסדנא לידע ציבורי.<br />
-        מפות: OpenFreeMap ו-OpenStreetMap. זמני נסיעה ברכב: OSRM, מותאמים לשעות העומס.
+        מפות: OpenFreeMap ו-OpenStreetMap. זמני נסיעה ברכב: OSRM, מותאמים לשעות העומס, ועם מפתח TomTom גם לפי הפקקים בפועל.
       </p>
       <button className="link danger" onClick={() => { if (confirm('למחוק היסטוריית חיפושים?')) updateSaved((x) => ({ ...x, recents: [] })); }}>מחיקת היסטוריית חיפושים</button>
       <p className="muted small">{getSaved().recents.length} חיפושים אחרונים שמורים במכשיר בלבד.</p>
@@ -68,6 +73,35 @@ function Seg({ label, value, options, onChange }: { label: string; value: number
       <div className="seg-ctl small">
         {options.map(([v, l]) => <button key={v} className={Math.abs(value - v) < 1e-6 ? 'on' : ''} onClick={() => onChange(v)}>{l}</button>)}
       </div>
+    </div>
+  );
+}
+
+function TrafficKey({ value, onSave }: { value: string; onSave: (k: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    const k = draft.trim();
+    onSave(k);
+    if (!k) { setStatus({ ok: true, text: 'המפתח נמחק. זמני הנסיעה ברכב יהיו הערכה.' }); return; }
+    setBusy(true);
+    try {
+      setStatus({ ok: true, text: await testKey(k) });
+    } catch (e: any) {
+      setStatus({ ok: false, text: e?.message || 'הבדיקה נכשלה' });
+    }
+    setBusy(false);
+  };
+  return (
+    <div>
+      <p className="muted small">עם מפתח חינמי של TomTom, זמני הנסיעה ברכב יכללו פקקים. המפתח נשמר רק במכשיר הזה.</p>
+      <div className="keyrow">
+        <input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="הדבקת מפתח" autoComplete="off" autoCapitalize="off" spellCheck={false} aria-label="מפתח TomTom" />
+        <button className="btn" onClick={save} disabled={busy}>{busy ? 'בודק…' : 'שמירה ובדיקה'}</button>
+      </div>
+      {status && <p className={'keystatus ' + (status.ok ? 'ok' : 'bad')}>{status.text}</p>}
+      {!status && value && <p className="keystatus ok">מפתח שמור</p>}
     </div>
   );
 }

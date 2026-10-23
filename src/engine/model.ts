@@ -19,6 +19,8 @@ export interface CarInfo {
   detourSec?: number; // ride-along: extra minutes for the driver
   driverFrom?: Place;
   approx?: boolean;
+  traffic?: boolean; // re-timed with live/predicted traffic
+  warn?: string; // e.g. over the driver's limit, or risk of missing the next bus
 }
 
 export interface Leg {
@@ -99,6 +101,7 @@ export interface PlanRequest {
   // on bus
   bus?: BusSel;
   prefs: Prefs;
+  trafficKey?: string; // TomTom key, if the user set one
 }
 
 export interface PlanResponse {
@@ -107,6 +110,7 @@ export interface PlanResponse {
   baseline?: Itinerary | null;
   note?: string;
   approx?: boolean;
+  traffic?: 'on' | 'off' | string; // 'on' = car legs include traffic; other string = error message
 }
 
 export interface BusCandidate {

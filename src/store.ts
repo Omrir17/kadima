@@ -7,6 +7,7 @@ export interface Settings {
   driveMin: number; // default pickup/drop-off minutes
   lambda: number; // how much driver minutes count (0..1)
   detourMin: number;
+  tomtomKey?: string; // stays on this device only
 }
 
 export interface Saved {

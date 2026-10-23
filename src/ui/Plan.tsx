@@ -82,7 +82,7 @@ export default function Plan({ init, me, openPicker, setScene, onOpenTrip, onMod
   // ------- build the request
   const req: PlanRequest | null = useMemo(() => {
     if (!destP) return null;
-    const base = { prefs: st.prefs, to: destP, time: timeKind === 'now' ? undefined : timeMs };
+    const base = { prefs: st.prefs, to: destP, time: timeKind === 'now' ? undefined : timeMs, trafficKey: st.tomtomKey || undefined };
     switch (mode) {
       case 'transit':
         return fromP ? { ...base, mode, from: fromP, arriveBy: timeKind === 'arrive' } : null;
@@ -303,6 +303,8 @@ export default function Plan({ init, me, openPicker, setScene, onOpenTrip, onMod
           ))}
           {resp.itineraries.length > 0 && resp.note && <p className="muted small">{resp.note}</p>}
           {resp.approx && <p className="muted small">זמני הנסיעה ברכב משוערים כי שירות המפות לא ענה.</p>}
+          {resp.traffic === 'on' && resp.itineraries.some((i) => i.legs.some((l) => l.car)) && <p className="traffic-ok">זמני הנסיעה ברכב כוללים פקקים</p>}
+          {resp.traffic && resp.traffic !== 'on' && resp.traffic !== 'off' && <p className="muted small">פקקים לא נלקחו בחשבון: {resp.traffic}</p>}
         </div>
       )}
       {destP && mode === 'transit' && !isSaved(saved, destP) && destP.name !== ME_NAME && (

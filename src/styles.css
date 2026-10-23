@@ -215,6 +215,13 @@ input[type='range'] { width: 100%; accent-color: var(--ride); height: 28px; }
 .itin-dur { font-size: 14px; color: var(--ink-2); }
 .itin-dur b { font-family: var(--f-disp); font-weight: 400; font-size: 22px; color: var(--ink); }
 .itin-car { font-size: 14px; font-weight: 600; color: var(--ride); }
+.warn { font-size: 13px; font-weight: 600; color: var(--late); }
+.traffic-ok { margin: 0; font-size: 13px; color: var(--live); font-weight: 600; }
+.keyrow { display: flex; gap: 8px; }
+.keyrow input { flex: 1; min-width: 0; height: 44px; border-radius: var(--r-ctl); border: 1.5px solid var(--line); padding: 0 12px; font-size: 15px; direction: ltr; text-align: left; background: var(--surface); }
+.keystatus { font-size: 13px; margin: 6px 0 0; }
+.keystatus.ok { color: var(--live); }
+.keystatus.bad { color: var(--late); }
 .itin-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; color: var(--muted); }
 .itin-meta .save { color: var(--live); font-weight: 600; }
 .itin-meta .tag { color: var(--ink-2); font-weight: 600; }

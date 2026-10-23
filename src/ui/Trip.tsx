@@ -112,8 +112,9 @@ function Step({ leg: l, next, live, now, open, toggle, openStop }: { leg: Leg; n
           <small className="muted">
             {durText(c.driveSec)} ברכב
             {c.role === 'ride' && c.detourSec ? `, עיקוף של כ-${mins(c.detourSec)} דק' לנהג` : ''}
-            {c.approx ? ' (הערכה)' : ''}
+            {c.approx ? ' (הערכה)' : c.traffic ? ', כולל פקקים' : ''}
           </small>
+          {c.warn && <small className="warn">{c.warn}</small>}
         </div>
       </li>
     );
@@ -192,10 +193,11 @@ function DriverPanel({ leg, it, mode }: { leg: Leg; it: Itinerary; mode: Mode })
         <span className="driver-ic"><IconCar size={20} /></span>
         <div>
           <b>{title}</b>
-          {c.driverTotalSec ? <small>זמן נהיגה לנהג: {mins(c.driverTotalSec)} דק'{c.approx ? ' (הערכה)' : ''}</small>
+          {c.driverTotalSec ? <small>זמן נהיגה לנהג: {mins(c.driverTotalSec)} דק'{c.approx ? ' (הערכה)' : c.traffic ? ', כולל פקקים' : ''}</small>
             : c.detourSec ? <small>עיקוף לנהג: כ-{mins(c.detourSec)} דק'</small> : <small>בלי עיקוף לנהג</small>}
         </div>
       </div>
+      {c.warn && <div className="warn">{c.warn}</div>}
       <div className="driver-actions">
         <a className="btn wa" href={`https://wa.me/?text=${encodeURIComponent(msg)}`} target="_blank" rel="noreferrer"><IconWhatsapp size={18} />שליחה לנהג</a>
         <a className="btn" href={wazeLink(point)} target="_blank" rel="noreferrer"><IconNav size={18} />Waze</a>
