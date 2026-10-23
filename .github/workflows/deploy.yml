@@ -1,0 +1,65 @@
+name: Build & deploy Kadima
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '15 1 * * *' # every night ~03:15-04:15 Israel time: fresh timetables
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Download Israeli GTFS feed
+        run: |
+          mkdir -p .gtfs
+          S3=https://openbus-stride-public.s3.eu-west-1.amazonaws.com/gtfs_archive
+          TODAY=$(TZ=Asia/Jerusalem date +%Y/%m/%d)
+          YDAY=$(TZ=Asia/Jerusalem date -d yesterday +%Y/%m/%d)
+          curl -fsSL --retry 3 -o .gtfs/israel.zip "$S3/$TODAY/israel-public-transportation.zip" \
+            || curl -fsSL --retry 3 -o .gtfs/israel.zip https://gtfs.mot.gov.il/gtfsfiles/israel-public-transportation.zip \
+            || curl -fsSL --retry 3 -o .gtfs/israel.zip "$S3/$YDAY/israel-public-transportation.zip"
+          cd .gtfs && unzip -o -q israel.zip && ls -la
+      - name: Build timetable data
+        run: npm run data
+      - name: Build app
+        run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - name: Keep the nightly schedule alive
+        # GitHub pauses scheduled workflows after 60 days without commits
+        if: github.event_name == 'schedule'
+        run: |
+          if [ "$(date +%d)" = "01" ]; then
+            date -u > .github/keepalive
+            git config user.name "kadima-bot"
+            git config user.email "kadima-bot@users.noreply.github.com"
+            git add .github/keepalive && git commit -m "keepalive" && git push || true
+          fi
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
