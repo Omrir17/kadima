@@ -4,7 +4,7 @@ import { api } from '../api';
 import { durText, hm, mins } from '../engine/time';
 import type { Scene } from './MapView';
 import { IconCar, IconNav, IconShare, IconWalk, IconWhatsapp } from './icons';
-import { DelayBadge, LineBadge, RIDE, Ribbon, legColor, useNowSec } from './parts';
+import { DelayBadge, LineBadge, RIDE, legColor, useNowSec } from './parts';
 
 interface Props {
   it: Itinerary;
@@ -68,7 +68,6 @@ export default function Trip({ it, mode, baseline, setScene, openStop }: Props) 
         </div>
         <div className="itin-dur"><b>{mins(it.arr - it.dep)}</b> דק'</div>
       </div>
-      <Ribbon it={it} />
       {saving >= 2 && <p className="save-line">מגיעים {saving} דק' לפני המסלול בתחבורה ציבורית בלבד ({hm(baseline!.arr)})</p>}
 
       {it.legs.map((l, i) => l.kind === 'car' && <DriverPanel key={'d' + i} leg={l} it={it} mode={mode} />)}

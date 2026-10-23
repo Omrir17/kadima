@@ -206,6 +206,7 @@ input[type='range'] { width: 100%; accent-color: var(--ride); height: 28px; }
 .card { background: var(--surface); border: 1.5px solid var(--line); border-radius: var(--r-card); }
 .itin { display: flex; flex-direction: column; gap: 10px; padding: 14px; width: 100%; }
 .itin:active { background: #fafbfc; }
+.itin > *, .near-stop > * { width: 100%; align-self: stretch; }
 .itin-top, .trip-head { display: flex; justify-content: space-between; align-items: baseline; }
 .itin-times { display: flex; align-items: center; gap: 10px; }
 .t-big { font-family: var(--f-disp); font-size: 24px; line-height: 1; }
@@ -217,13 +218,6 @@ input[type='range'] { width: 100%; accent-color: var(--ride); height: 28px; }
 .itin-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; color: var(--muted); }
 .itin-meta .save { color: var(--live); font-weight: 600; }
 .itin-meta .tag { color: var(--ink-2); font-weight: 600; }
-
-/* the journey ribbon */
-.ribbon { display: flex; gap: 2px; height: 22px; direction: rtl; }
-.seg { flex-basis: 0; min-width: 6px; border-radius: 5px; display: flex; align-items: center; justify-content: center; gap: 3px; color: #fff; overflow: hidden; font-family: var(--f-disp); font-size: 13px; }
-.seg b { font-weight: 400; padding-top: 1px; }
-.seg-walk { background: repeating-linear-gradient(90deg, #aeb6be 0 4px, transparent 4px 8px); background-position: center; background-size: 100% 4px; background-repeat: repeat-x; }
-.seg-wait { background: transparent; border: 1.5px dashed #d3d8dc; }
 
 /* ---------- trip ---------- */
 .trip { display: flex; flex-direction: column; gap: 12px; }

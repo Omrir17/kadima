@@ -38,33 +38,6 @@ export function legColor(l: Leg) {
   return l.color || '#5a6b7d';
 }
 
-/** Proportional journey bar: each leg's width = its share of the total time. */
-export function Ribbon({ it, start }: { it: Itinerary; start?: number }) {
-  const t0 = start ?? it.dep;
-  const total = Math.max(60, it.arr - t0);
-  const segs: { w: number; leg: Leg | null }[] = [];
-  let cursor = t0;
-  for (const l of it.legs) {
-    if (l.dep > cursor + 30) segs.push({ w: (l.dep - cursor) / total, leg: null });
-    segs.push({ w: Math.max(0, l.arr - Math.max(l.dep, cursor)) / total, leg: l });
-    cursor = Math.max(cursor, l.arr);
-  }
-  return (
-    <div className="ribbon" aria-hidden>
-      {segs.map((s, i) => {
-        const l = s.leg;
-        const cls = !l ? 'wait' : l.kind;
-        const showLabel = l && l.kind !== 'walk' && s.w > 0.09;
-        return (
-          <div key={i} className={'seg seg-' + cls} style={{ flexGrow: Math.max(s.w, 0.025), background: l && l.kind !== 'walk' ? legColor(l) : undefined }}>
-            {showLabel && (l!.kind === 'car' ? <IconCar size={14} /> : <><ModeIcon rtype={l!.rtype} size={13} /><b>{l!.line}</b></>)}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 export function LegChips({ it }: { it: Itinerary }) {
   const out: JSX.Element[] = [];
   it.legs.filter((l) => !(l.kind === 'walk' && l.arr - l.dep < 50 && it.legs.length > 1)).forEach((l, i) => {
@@ -101,7 +74,6 @@ export function ItinCard({ it, now, onClick, baseline }: { it: Itinerary; now: n
         </div>
         <div className="itin-dur"><b>{mins(it.arr - it.dep)}</b> דק'</div>
       </div>
-      <Ribbon it={it} />
       <LegChips it={it} />
       {head && <div className="itin-car">{head}</div>}
       <div className="itin-meta">
