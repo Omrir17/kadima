@@ -1,6 +1,12 @@
 // Traffic-aware driving times from TomTom (free tier: ~2,500 requests/day).
 // Used only to re-check the few car legs the user actually sees.
 import type { LatLon } from '../engine/geo';
+import { hm, israelParts } from '../engine/time';
+
+function israelLocal(ms: number) {
+  const p = israelParts(ms);
+  return `${p.ymd}T${hm(p.sec)}:00`;
+}
 
 const BASE = 'https://api.tomtom.com/routing/1/calculateRoute';
 
@@ -25,19 +31,26 @@ async function slot<T>(fn: () => Promise<T>): Promise<T> {
 /** Driving time through the given points, with traffic at `departMs` (epoch ms). */
 export function trafficRoute(key: string, pts: LatLon[], departMs: number): Promise<TrafficRoute> {
   const soon = departMs - Date.now() < 2 * 60e3;
-  const bucket = soon ? 'now' : new Date(Math.round(departMs / 300e3) * 300e3).toISOString().replace(/\.\d+Z$/, 'Z');
+  // RFC 3339 local time without offset: TomTom then assumes the origin's time zone (Israel)
+  const bucket = soon ? 'now' : israelLocal(Math.round(departMs / 300e3) * 300e3);
   const locs = pts.map((p) => `${p[0].toFixed(5)},${p[1].toFixed(5)}`).join(':');
   const id = locs + '@' + bucket;
   const hit = cache.get(id);
   if (hit) return hit;
   const url = `${BASE}/${locs}/json?key=${encodeURIComponent(key)}&traffic=true&travelMode=car&routeType=fastest` +
-    `&departAt=${encodeURIComponent(bucket)}&computeTravelTimeFor=all&routeRepresentation=none`;
+    `&departAt=${encodeURIComponent(bucket)}&computeTravelTimeFor=all&routeRepresentation=summaryOnly`;
   const p = slot(async () => {
     const ctl = new AbortController();
     const tm = setTimeout(() => ctl.abort(), 8000);
     try {
       const r = await fetch(url, { signal: ctl.signal });
-      if (!r.ok) throw new Error(r.status === 403 || r.status === 401 ? 'מפתח TomTom לא תקין' : r.status === 429 ? 'נגמרה המכסה היומית של TomTom' : 'TomTom ' + r.status);
+      if (!r.ok) {
+        if (r.status === 403 || r.status === 401) throw new Error('מפתח TomTom לא תקין, או ש-Routing API לא מופעל עליו');
+        if (r.status === 429) throw new Error('נגמרה המכסה היומית של TomTom');
+        let detail = '';
+        try { const j = await r.json(); detail = j?.detailedError?.message || j?.error?.description || ''; } catch { /* not json */ }
+        throw new Error(`TomTom ${r.status}${detail ? ': ' + detail : ''}`);
+      }
       const j = await r.json();
       const s = j.routes?.[0]?.summary;
       if (!s) throw new Error('TomTom: no route');
