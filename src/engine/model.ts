@@ -48,6 +48,7 @@ export interface Leg {
   shape?: number;
   onBus?: boolean;
   delay?: number; // live delay in seconds (positive = late)
+  live?: boolean; // times include real-time data
   // car
   car?: CarInfo;
   geometry?: LatLon[];
@@ -70,9 +71,12 @@ export interface Prefs {
   maxWalk: number; // meters (street distance) for access/egress
   slack: number; // seconds per transfer
   maxRounds: number;
+  noBus?: boolean;
+  noTrain?: boolean;
+  noLightRail?: boolean;
 }
 
-export const DEFAULT_PREFS: Prefs = { walkSpeed: 1.25, maxWalk: 1000, slack: 90, maxRounds: 5 };
+export const DEFAULT_PREFS: Prefs = { walkSpeed: 1.25, maxWalk: 1000, slack: 90, maxRounds: 5, noBus: false, noTrain: false, noLightRail: false };
 
 export type Mode = 'transit' | 'pickup' | 'dropoff' | 'ride' | 'onbus';
 
@@ -102,6 +106,7 @@ export interface PlanRequest {
   bus?: BusSel;
   prefs: Prefs;
   trafficKey?: string; // TomTom key, if the user set one
+  live?: boolean; // apply real-time bus delays (slower: fetches live data)
 }
 
 export interface PlanResponse {
@@ -111,6 +116,7 @@ export interface PlanResponse {
   note?: string;
   approx?: boolean;
   traffic?: 'on' | 'off' | string; // 'on' = car legs include traffic; other string = error message
+  live?: boolean; // itineraries were planned with real-time delays
 }
 
 export interface BusCandidate {
@@ -140,6 +146,7 @@ export interface Departure {
   time: number;
   sched: number;
   live: boolean;
+  stopsAway?: number; // live: how many stops the bus still has before this stop
   route: number;
   gtfsRoute: number;
   line: string;
@@ -160,6 +167,7 @@ export interface LineVariant {
   to: string;
   patterns: number[];
   color: string;
+  distM?: number; // from the user to the closest stop of the line
 }
 
 export interface VehicleView {
@@ -171,4 +179,10 @@ export interface VehicleView {
   delay?: number;
   ageSec: number;
   tripRef: number;
+  trip?: number;
+  route?: number;
+  rtype?: number;
+  headsign?: string;
+  nextStop?: string;
+  pos?: number; // fractional position along the trip's stops
 }

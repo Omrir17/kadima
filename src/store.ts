@@ -10,10 +10,13 @@ export interface Settings {
   tomtomKey?: string; // stays on this device only
 }
 
+export interface FavLine { gtfsRoute: number; line: string; to: string; color: string; rtype: number }
+
 export interface Saved {
   home?: Place;
   work?: Place;
   favorites: Place[];
+  favLines: FavLine[];
   recents: Place[];
   settings: Settings;
 }
@@ -21,6 +24,7 @@ export interface Saved {
 const KEY = 'kadima:v1';
 const DEFAULT: Saved = {
   favorites: [],
+  favLines: [],
   recents: [],
   settings: { prefs: DEFAULT_PREFS, driveMin: 10, lambda: 0.3, detourMin: 3 },
 };

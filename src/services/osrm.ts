@@ -79,3 +79,17 @@ export function estDriveSec(crowM: number) {
 export function estDriveBetween(a: LatLon, b: LatLon) {
   return estDriveSec(distM(a[0], a[1], b[0], b[1]));
 }
+
+/** Real walking path (FOSSGIS foot router) for drawing walk legs on the map. */
+const footCache = new Map<string, Promise<LatLon[]>>();
+export function footRoute(a: LatLon, b: LatLon): Promise<LatLon[]> {
+  const key = fmtPt(a) + ';' + fmtPt(b);
+  let p = footCache.get(key);
+  if (!p) {
+    p = getJson(`https://routing.openstreetmap.de/routed-foot/route/v1/driving/${key}?overview=full&geometries=geojson`, 8000)
+      .then((j) => j.routes[0].geometry.coordinates.map((x: number[]) => [x[1], x[0]] as LatLon));
+    footCache.set(key, p);
+    p.catch(() => footCache.delete(key));
+  }
+  return p;
+}

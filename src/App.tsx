@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { Itinerary, Mode, Place } from './engine/model';
+import type { Itinerary, Mode, Place, VehicleView } from './engine/model';
 import type { LatLon } from './engine/geo';
 import { api } from './api';
 import { addRecent, updateSaved } from './store';
 import { reverseGeocode } from './services/geocode';
-import MapView, { Scene } from './ui/MapView';
+import MapView, { MapVehicle, Scene } from './ui/MapView';
 import Sheet, { Snap } from './ui/Sheet';
 import Home from './ui/Home';
 import Plan, { PlanInit } from './ui/Plan';
@@ -13,15 +13,15 @@ import StopView from './ui/StopView';
 import LineView from './ui/LineView';
 import Settings from './ui/Settings';
 import PlacePicker, { PickerOpts } from './ui/PlacePicker';
-import { IconBack, IconLocate } from './ui/icons';
-import { Spinner } from './ui/parts';
+import { IconBack, IconClose, IconLocate } from './ui/icons';
+import { DelayBadge, LineBadge, Spinner } from './ui/parts';
 
 type View =
   | { name: 'home' }
   | { name: 'plan'; init: PlanInit }
   | { name: 'trip'; it: Itinerary; mode: Mode; baseline?: Itinerary | null }
   | { name: 'stop'; place: Place }
-  | { name: 'line'; q?: string }
+  | { name: 'line'; q?: string; gtfsRoute?: number }
   | { name: 'settings' };
 
 const TITLES: Partial<Record<View['name'], string>> = { line: 'קווים', settings: 'הגדרות', trip: 'המסלול' };
@@ -54,6 +54,10 @@ export default function App() {
   const [picker, setPicker] = useState<PickerOpts | null>(null);
   const [mapPick, setMapPick] = useState<((p: Place) => void) | null>(null);
   const [recenter, setRecenter] = useState(0);
+  // live buses shown on the map by the current screen
+  const [vehicles, setVehicles] = useState<VehicleView[]>([]);
+  const [vehFocus, setVehFocus] = useState<string | null>(null);
+  const [follow, setFollow] = useState(false);
   const { pos: me, err: geoErr } = useGeo();
   const view = stack[stack.length - 1];
 
@@ -82,6 +86,9 @@ export default function App() {
     return () => window.removeEventListener('popstate', onPop);
   }, []);
 
+  // each screen brings its own buses
+  useEffect(() => { setVehicles([]); setVehFocus(null); setFollow(false); }, [view]);
+
   useEffect(() => {
     // pick a sensible sheet height per screen
     if (view.name === 'home') setSnap('half');
@@ -96,7 +103,7 @@ export default function App() {
   const go = {
     plan: (mode: Mode, to?: Place) => push({ name: 'plan', init: { mode, to } }),
     stop: (place: Place) => push({ name: 'stop', place }),
-    line: (q?: string) => push({ name: 'line', q }),
+    line: (q?: string, gtfsRoute?: number) => push({ name: 'line', q, gtfsRoute }),
     settings: () => push({ name: 'settings' }),
     search: () => openPicker({ title: 'לאן נוסעים?', onPick: (p) => { addRecent(p); push({ name: 'plan', init: { mode: 'transit', to: p } }); } }),
     setPlace: (k: 'home' | 'work') => openPicker({ title: k === 'home' ? 'איפה הבית?' : 'איפה העבודה או הלימודים?', allowCurrent: true, onPick: (p) => updateSaved((x) => ({ ...x, [k]: p })) }),
@@ -135,6 +142,11 @@ export default function App() {
     );
   }
 
+  const mapVehicles: MapVehicle[] = vehicles.map((v) => ({
+    id: String(v.tripRef), lat: v.lat, lon: v.lon, color: v.color, label: v.line, bearing: v.bearing, late: (v.delay ?? 0) > 180,
+  }));
+  const focused = vehFocus ? vehicles.find((v) => String(v.tripRef) === vehFocus) : undefined;
+
   const header = view.name !== 'home' && (
     <div className="sheet-head">
       <button className="icon-btn" onClick={back} aria-label="חזרה"><IconBack /></button>
@@ -144,7 +156,22 @@ export default function App() {
 
   return (
     <div className="app">
-      <MapView scene={scene} me={me} bottomPad={sheetH} onMapClick={onMapClick} onPointClick={onPointClick} recenterSignal={recenter} />
+      <MapView
+        scene={scene} me={me} bottomPad={sheetH} onMapClick={onMapClick} onPointClick={onPointClick} recenterSignal={recenter}
+        vehicles={mapVehicles} onVehicleClick={setVehFocus} follow={follow}
+      />
+      {focused && (
+        <div className="vcard" style={{ bottom: sheetH + 12 }} role="dialog" aria-label={`קו ${focused.line}`}>
+          <div className="vcard-top">
+            <LineBadge line={focused.line} color={focused.color} rtype={focused.rtype} />
+            <div className="row-txt"><b>ל{focused.headsign}</b>{focused.nextStop && <small>התחנה הבאה: {focused.nextStop}</small>}</div>
+            <DelayBadge delay={focused.delay} />
+            <button className="icon-btn" onClick={() => setVehFocus(null)} aria-label="סגירה"><IconClose size={18} /></button>
+          </div>
+          <small>מיקום מוערך לפי הדיווח האחרון מלפני {Math.max(1, Math.round(focused.ageSec / 60))} דק'</small>
+          {view.name !== 'line' && <button className="link" onClick={() => go.line(focused.line)}>כל האוטובוסים בקו</button>}
+        </div>
+      )}
       {view.name === 'home' && <div className="brand" aria-hidden>קדימה</div>}
       <button className="locate" style={{ bottom: sheetH + 14 }} onClick={() => setRecenter((x) => x + 1)} aria-label="המיקום שלי"><IconLocate /></button>
       {mapPick && (
@@ -154,7 +181,7 @@ export default function App() {
         </div>
       )}
       <Sheet snap={snap} onSnap={setSnap} onHeight={setSheetH} header={header}>
-        {view.name === 'home' && <Home me={me} geoError={geoErr} setScene={setScene} go={go} />}
+        {view.name === 'home' && <Home me={me} geoError={geoErr} setScene={setScene} setVehicles={setVehicles} go={go} />}
         {view.name === 'plan' && (
           <Plan
             key={stack.length}
@@ -165,9 +192,9 @@ export default function App() {
             onOpenTrip={(it, ctx) => push({ name: 'trip', it, mode: ctx.mode, baseline: ctx.baseline })}
           />
         )}
-        {view.name === 'trip' && <Trip it={view.it} mode={view.mode} baseline={view.baseline} setScene={setScene} openStop={go.stop} />}
-        {view.name === 'stop' && <StopView key={view.place.stop} place={view.place} setScene={setScene} planTo={go.plan} openLine={(q) => go.line(q)} />}
-        {view.name === 'line' && <LineView initialQ={view.q} setScene={setScene} openStop={go.stop} />}
+        {view.name === 'trip' && <Trip it={view.it} mode={view.mode} baseline={view.baseline} setScene={setScene} setVehicles={setVehicles} openStop={go.stop} me={me} setFollow={setFollow} />}
+        {view.name === 'stop' && <StopView key={view.place.stop} place={view.place} setScene={setScene} setVehicles={setVehicles} focusVehicle={setVehFocus} planTo={go.plan} openLine={(q, r) => go.line(q, r)} />}
+        {view.name === 'line' && <LineView initialQ={view.q} initialRoute={view.gtfsRoute} setScene={setScene} setVehicles={setVehicles} openStop={go.stop} me={me} />}
         {view.name === 'settings' && <Settings openPicker={openPicker} dataInfo={ready} />}
       </Sheet>
       {picker && (

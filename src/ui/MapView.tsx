@@ -6,13 +6,12 @@ import type { LatLon } from '../engine/geo';
 export interface MapLine { coords: LatLon[]; color: string; width?: number; dash?: boolean }
 export interface MapPoint { lat: number; lon: number; color?: string; id?: number; small?: boolean }
 export interface MapPin { lat: number; lon: number; kind: 'start' | 'end' | 'car' | 'pin'; label?: string }
-export interface MapVehicle { lat: number; lon: number; color: string; label: string; bearing?: number; late?: boolean }
+export interface MapVehicle { id: string; lat: number; lon: number; color: string; label: string; bearing?: number; late?: boolean; dim?: boolean }
 
 export interface Scene {
   lines?: MapLine[];
   points?: MapPoint[];
   pins?: MapPin[];
-  vehicles?: MapVehicle[];
   fit?: LatLon[];
   key?: string; // change to refit
 }
@@ -24,19 +23,27 @@ interface Props {
   onMapClick?: (lat: number, lon: number) => void;
   onPointClick?: (id: number) => void;
   recenterSignal?: number;
+  /** live buses: updated often, animated in place (not part of the scene) */
+  vehicles?: MapVehicle[];
+  onVehicleClick?: (id: string) => void;
+  /** keep the map centred on my position (live trip tracking) */
+  follow?: boolean;
 }
+
+interface VehMarker { marker: maplibregl.Marker; el: HTMLDivElement; lat: number; lon: number; anim?: number }
 
 const STYLE = 'https://tiles.openfreemap.org/styles/positron';
 let rtlSet = false;
 
-export default function MapView({ scene, me, bottomPad, onMapClick, onPointClick, recenterSignal }: Props) {
+export default function MapView({ scene, me, bottomPad, onMapClick, onPointClick, recenterSignal, vehicles, onVehicleClick, follow }: Props) {
   const el = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const loaded = useRef(false);
   const markers = useRef<maplibregl.Marker[]>([]);
   const meMarker = useRef<maplibregl.Marker | null>(null);
-  const cb = useRef({ onMapClick, onPointClick });
-  cb.current = { onMapClick, onPointClick };
+  const vehMarkers = useRef(new Map<string, VehMarker>());
+  const cb = useRef({ onMapClick, onPointClick, onVehicleClick });
+  cb.current = { onMapClick, onPointClick, onVehicleClick };
   const lastFit = useRef<string>('');
   const padRef = useRef(bottomPad);
   padRef.current = bottomPad;
@@ -125,13 +132,6 @@ export default function MapView({ scene, me, bottomPad, onMapClick, onPointClick
       if (p.label) d.innerHTML = `<span>${escapeHtml(p.label)}</span>`;
       markers.current.push(new maplibregl.Marker({ element: d, anchor: p.kind === 'pin' || p.kind === 'end' ? 'bottom' : 'center' }).setLngLat([p.lon, p.lat]).addTo(m));
     }
-    for (const v of sc.vehicles || []) {
-      const d = document.createElement('div');
-      d.className = 'veh' + (v.late ? ' late' : '');
-      d.style.setProperty('--c', v.color);
-      d.innerHTML = `<b>${escapeHtml(v.label)}</b>`;
-      markers.current.push(new maplibregl.Marker({ element: d }).setLngLat([v.lon, v.lat]).addTo(m));
-    }
     const key = sc.key ?? '';
     if (sc.fit && sc.fit.length && key !== lastFit.current) {
       lastFit.current = key;
@@ -160,6 +160,59 @@ export default function MapView({ scene, me, bottomPad, onMapClick, onPointClick
   }
 
   useEffect(() => { apply(scene); }, [scene]);
+
+  // live buses: create / glide / remove markers without touching the rest of the map
+  useEffect(() => {
+    const m = map.current;
+    if (!m) return;
+    const seen = new Set<string>();
+    for (const v of vehicles || []) {
+      seen.add(v.id);
+      let vm = vehMarkers.current.get(v.id);
+      if (!vm) {
+        // outer element belongs to MapLibre (it adds positioning classes); we style an inner one
+        const outer = document.createElement('div');
+        const el = document.createElement('div');
+        outer.appendChild(el);
+        outer.addEventListener('click', (e) => { e.stopPropagation(); cb.current.onVehicleClick?.(v.id); });
+        const marker = new maplibregl.Marker({ element: outer }).setLngLat([v.lon, v.lat]).addTo(m);
+        vm = { marker, el, lat: v.lat, lon: v.lon };
+        vehMarkers.current.set(v.id, vm);
+      } else glide(vm, v.lat, v.lon);
+      vm.el.className = 'veh' + (v.late ? ' late' : '') + (v.dim ? ' dim' : '');
+      vm.el.style.setProperty('--c', v.color);
+      vm.el.innerHTML = `<i class="veh-dir" style="transform:rotate(${Math.round(v.bearing ?? 0)}deg)"></i><b>${escapeHtml(v.label)}</b>`;
+    }
+    for (const [id, vm] of vehMarkers.current) {
+      if (seen.has(id)) continue;
+      if (vm.anim) cancelAnimationFrame(vm.anim);
+      vm.marker.remove();
+      vehMarkers.current.delete(id);
+    }
+  }, [vehicles]);
+
+  function glide(vm: VehMarker, lat: number, lon: number) {
+    if (vm.anim) cancelAnimationFrame(vm.anim);
+    const fromLat = vm.lat, fromLon = vm.lon;
+    vm.lat = lat; vm.lon = lon;
+    if (Math.abs(fromLat - lat) + Math.abs(fromLon - lon) > 0.02 || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      vm.marker.setLngLat([lon, lat]);
+      return;
+    }
+    const t0 = performance.now(), dur = 1500;
+    const step = (t: number) => {
+      const f = Math.min(1, (t - t0) / dur);
+      const e = f * (2 - f);
+      vm.marker.setLngLat([fromLon + (lon - fromLon) * e, fromLat + (lat - fromLat) * e]);
+      if (f < 1) vm.anim = requestAnimationFrame(step); else vm.anim = undefined;
+    };
+    vm.anim = requestAnimationFrame(step);
+  }
+
+  useEffect(() => {
+    const m = map.current;
+    if (follow && m && me) m.easeTo({ center: [me[1], me[0]], offset: [0, -Math.round(padRef.current / 2) + 20], duration: 800 });
+  }, [follow, me]);
 
   useEffect(() => {
     const m = map.current;

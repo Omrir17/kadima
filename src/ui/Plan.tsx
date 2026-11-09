@@ -9,7 +9,7 @@ import type { Scene } from './MapView';
 import type { PickerOpts } from './PlacePicker';
 import { ME_NAME } from './PlacePicker';
 import { IconBus, IconDropoff, IconPickup, IconSwap, IconThumb, IconTrain } from './icons';
-import { DelayBadge, Empty, ItinCard, LineBadge, Spinner, legColor, useNowSec } from './parts';
+import { DelayBadge, Empty, ItinCard, LineBadge, LiveIcon, Spinner, legColor, useNowSec } from './parts';
 
 export interface PlanInit {
   mode: Mode;
@@ -67,6 +67,7 @@ export default function Plan({ init, me, openPicker, setScene, onOpenTrip, onMod
   const [resp, setResp] = useState<PlanResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [liveState, setLiveState] = useState<'off' | 'loading' | 'on' | 'none'>('off');
   const gen = useRef(0);
   const now = useNowSec(resp?.date);
 
@@ -119,18 +120,31 @@ export default function Plan({ init, me, openPicker, setScene, onOpenTrip, onMod
     const g = ++gen.current;
     setBusy(true);
     setError(null);
+    // live phase: for "leave now" transit plans, re-plan with real-time delays, and keep it fresh
+    const wantsLive = req.mode === 'transit' && !req.time && !req.arriveBy;
+    let liveTimer: ReturnType<typeof setInterval> | undefined;
+    const runLive = () => api.plan({ ...req, live: true }).then((r) => {
+      if (g !== gen.current) return;
+      if (r.itineraries.length) setResp(r);
+      setLiveState(r.live ? 'on' : 'none');
+    }).catch(() => g === gen.current && setLiveState('none'));
+    setLiveState(wantsLive ? 'loading' : 'off');
     const t = setTimeout(() => {
       api.plan(req).then((r) => {
         if (g !== gen.current) return;
         setResp(r);
         setBusy(false);
+        if (wantsLive) {
+          runLive();
+          liveTimer = setInterval(runLive, 60000);
+        }
       }).catch((e) => {
         if (g !== gen.current) return;
         setError(e.message);
         setBusy(false);
       });
     }, 250);
-    return () => clearTimeout(t);
+    return () => { clearTimeout(t); if (liveTimer) clearInterval(liveTimer); };
   }, [reqKey]);
 
   // ------- map scene: draw best result
@@ -303,6 +317,8 @@ export default function Plan({ init, me, openPicker, setScene, onOpenTrip, onMod
       {error && <Empty title="משהו השתבש">{error}</Empty>}
       {resp && (
         <div className="results">
+          {liveState === 'loading' && resp.itineraries.length > 0 && <p className="live-note">בודק איפה האוטובוסים עכשיו…</p>}
+          {liveState === 'on' && <p className="live-note on"><LiveIcon />המסלולים מעודכנים לפי מיקום האוטובוסים בזמן אמת</p>}
           {resp.baseline && (
             <div className="baseline">בלי נהג: הגעה ב-<b>{hm(resp.baseline.arr)}</b> בתחבורה ציבורית בלבד</div>
           )}

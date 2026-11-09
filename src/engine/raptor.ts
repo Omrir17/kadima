@@ -14,6 +14,10 @@ export interface RaptorOpts {
   slack: number; // seconds needed for a same-stop transfer
   walkSpeed: number; // m/s
   maxTime: number; // ignore arrivals after this
+  /** live delays: trip index -> seconds late (negative = early). Applied to every stop of the trip. */
+  delays?: Map<number, number>;
+  /** patterns that may not be used (e.g. the user turned off trains) */
+  banned?: Uint8Array;
 }
 
 export type RawLeg =
@@ -40,6 +44,10 @@ export class Raptor {
   private nMarked = 0;
   private qPos: Int32Array;
   private qList: Int32Array;
+  /** per-trip delay of the current run (0 = on schedule) */
+  private dl: Int32Array;
+  private dlTouched: number[] = [];
+  private useDelays = false;
 
   constructor(private net: Net, private day: Day) {
     this.n = net.nStops;
@@ -48,6 +56,7 @@ export class Raptor {
     this.markedList = new Int32Array(this.n);
     this.qPos = new Int32Array(day.nPat).fill(-1);
     this.qList = new Int32Array(day.nPat);
+    this.dl = new Int32Array(day.nTrip);
   }
 
   private alloc(K: number) {
@@ -78,6 +87,20 @@ export class Raptor {
     best.fill(INF);
     this.nMarked = 0;
     this.marked.fill(0);
+
+    // live delays
+    const D = this.dl;
+    for (const t of this.dlTouched) D[t] = 0;
+    this.dlTouched = [];
+    let maxLate = 0, maxEarly = 0;
+    if (o.delays) for (const [t, d] of o.delays) {
+      D[t] = d;
+      this.dlTouched.push(t);
+      if (d > maxLate) maxLate = d;
+      if (-d > maxEarly) maxEarly = -d;
+    }
+    const useD = (this.useDelays = this.dlTouched.length > 0);
+    const banned = o.banned;
 
     // egress lookup
     const egByStop = new Map<number, Egress[]>();
@@ -113,6 +136,7 @@ export class Raptor {
         this.marked[s] = 0;
         for (let j = spOff[s]; j < spOff[s + 1]; j++) {
           const p = spPat[j], pos = spPos[j];
+          if (banned && banned[p]) continue;
           if (qPos[p] < 0) { qPos[p] = pos; qList[nQ++] = p; }
           else if (pos < qPos[p]) qPos[p] = pos;
         }
@@ -133,7 +157,7 @@ export class Raptor {
         for (let i = start; i < ns; i++) {
           const s = patStops[so + i];
           if (trip >= 0) {
-            const arr = times[tbase + i];
+            const arr = times[tbase + i] + (useD ? D[trip] : 0);
             if (arr < best[s] && arr < bound) {
               tau[cur + s] = arr;
               best[s] = arr;
@@ -148,17 +172,40 @@ export class Raptor {
           const ty = lType[prev + s];
           if (ty) {
             const ready = tau[prev + s] + (ty === T_TRANSIT ? o.slack : ty === T_WALK ? 30 : 0);
-            if (trip < 0 || ready <= times[tbase + i]) {
-              // binary search earliest trip with time >= ready at position i
-              let lo = t0, hi = (trip >= 0 ? trip : t1);
-              while (lo < hi) {
-                const mid = (lo + hi) >> 1;
-                if (times[to + (mid - t0) * ns + i] >= ready) hi = mid; else lo = mid + 1;
-              }
-              if (lo < t1 && (trip < 0 || lo < trip)) {
-                trip = lo;
-                tbase = to + (lo - t0) * ns;
-                boardPos = i;
+            const curEff = trip >= 0 ? times[tbase + i] + (useD ? D[trip] : 0) : INF;
+            if (ready <= curEff) {
+              if (!useD) {
+                // binary search earliest trip with time >= ready at position i
+                let lo = t0, hi = (trip >= 0 ? trip : t1);
+                while (lo < hi) {
+                  const mid = (lo + hi) >> 1;
+                  if (times[to + (mid - t0) * ns + i] >= ready) hi = mid; else lo = mid + 1;
+                }
+                if (lo < t1 && (trip < 0 || lo < trip)) {
+                  trip = lo;
+                  tbase = to + (lo - t0) * ns;
+                  boardPos = i;
+                }
+              } else {
+                // with live delays trips can swap order: search a window by schedule, compare real times
+                let lo = t0, hi = t1;
+                const target = ready - maxLate;
+                while (lo < hi) {
+                  const mid = (lo + hi) >> 1;
+                  if (times[to + (mid - t0) * ns + i] >= target) hi = mid; else lo = mid + 1;
+                }
+                let bestT = -1, bestE = curEff;
+                for (let t = lo; t < t1; t++) {
+                  const sch = times[to + (t - t0) * ns + i];
+                  if (sch - maxEarly >= bestE) break;
+                  const e = sch + D[t];
+                  if (e >= ready && e < bestE) { bestE = e; bestT = t; }
+                }
+                if (bestT >= 0) {
+                  trip = bestT;
+                  tbase = to + (bestT - t0) * ns;
+                  boardPos = i;
+                }
               }
             }
           }
@@ -265,7 +312,8 @@ export class Raptor {
         const p = day.tripPat[trip];
         const ns = day.patStopOff[p + 1] - day.patStopOff[p];
         const tb = day.patTimeOff[p] + (trip - day.patTripOff[p]) * ns;
-        legs.push({ t: 'transit', trip, pat: p, board, alight, dep: day.times[tb + board], arr: day.times[tb + alight] });
+        const d = this.useDelays ? this.dl[trip] : 0;
+        legs.push({ t: 'transit', trip, pat: p, board, alight, dep: day.times[tb + board] + d, arr: day.times[tb + alight] + d });
         s = day.patStops[day.patStopOff[p] + board];
         k--;
       } else if (ty === T_ACCESS) {

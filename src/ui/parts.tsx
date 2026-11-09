@@ -32,6 +32,27 @@ export function inMinutes(sec: number, now: number) {
   return hm(sec);
 }
 
+/** The "real-time" signal icon (like Moovit/Rav-Pass), shown next to live times. */
+export function LiveIcon({ size = 12 }: { size?: number }) {
+  return (
+    <svg className="live-ic" width={size} height={size} viewBox="0 0 12 12" aria-label="זמן אמת" role="img">
+      <circle cx="2.2" cy="9.8" r="1.6" fill="currentColor" />
+      <path d="M1.6 5.6a4.8 4.8 0 0 1 4.8 4.8" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      <path d="M1.6 1.6a8.8 8.8 0 0 1 8.8 8.8" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** Minutes until a time: green with the live icon when it comes from real-time data. */
+export function Mins({ sec, now, live, className }: { sec: number; now: number; live?: boolean; className?: string }) {
+  return (
+    <span className={'mins' + (live ? ' is-live' : '') + (className ? ' ' + className : '')}>
+      {live && <LiveIcon />}
+      {inMinutes(sec, now)}
+    </span>
+  );
+}
+
 export function legColor(l: Leg) {
   if (l.kind === 'walk') return WALK;
   if (l.kind === 'car') return RIDE;
@@ -53,13 +74,14 @@ function carHeadline(it: Itinerary): string | null {
   const car = it.legs.find((l) => l.kind === 'car');
   if (!car?.car) return null;
   const c = car.car;
-  if (c.role === 'pickup') return `איסוף ב${car.from.name} ב-${hm(car.dep)}`;
-  if (c.role === 'dropoff') return it.legs.length === 1 ? `הנהג לוקח אותך עד היעד` : `הקפצה ל${car.to.name}`;
+  if (c.role === 'pickup') return `איסוף בתחנה ${car.from.name}, ${hm(car.dep)}`;
+  if (c.role === 'dropoff') return it.legs.length === 1 ? `הנהג לוקח אותך עד היעד` : `הקפצה אל ${car.to.name}`;
   if (it.legs.length === 1) return `הנהג מוריד אותך ביעד`;
-  return `לרדת מהרכב ב${car.to.name.replace(/^ליד /, 'ליד ')}`;
+  return `לרדת מהרכב: ${car.to.name}`;
 }
 
-export function ItinCard({ it, now, onClick, baseline }: { it: Itinerary; now: number; onClick: () => void; baseline?: Itinerary | null }) {
+export function ItinCard({ it, onClick, baseline }: { it: Itinerary; now?: number; onClick: () => void; baseline?: Itinerary | null }) {
+  const now = epochToDaySec(Date.now(), it.date); // results can be for tomorrow
   const firstTransit = it.legs.find((l) => l.kind === 'transit');
   const leaveIn = Math.round((it.dep - now) / 60);
   const head = carHeadline(it);
@@ -77,6 +99,16 @@ export function ItinCard({ it, now, onClick, baseline }: { it: Itinerary; now: n
       <LegChips it={it} />
       {head && <div className="itin-car">{head}</div>}
       {it.legs.map((l) => l.car?.warn).filter(Boolean).map((w, i) => <div key={i} className="warn">{w}</div>)}
+      {firstTransit && !firstTransit.onBus && firstTransit.dep - now < 90 * 60 && (
+        <div className="itin-next">
+          <LineBadge line={firstTransit.line} color={firstTransit.color} rtype={firstTransit.rtype} size="s" />
+          <span>יוצא מתחנת {firstTransit.from.name}</span>
+          <Mins sec={firstTransit.dep} now={now} live={firstTransit.live} />
+          {firstTransit.live && firstTransit.delay !== undefined && Math.abs(firstTransit.delay) >= 120 && (
+            <small className={firstTransit.delay > 0 ? 'late-txt' : 'early-txt'}>{firstTransit.delay > 0 ? `מאחר ${Math.round(firstTransit.delay / 60)}'` : `מקדים ${Math.round(-firstTransit.delay / 60)}'`}</small>
+          )}
+        </div>
+      )}
       <div className="itin-meta">
         {firstTransit?.onBus ? <span>להישאר באוטובוס עד {firstTransit.to.name}</span>
           : leaveIn > 0 ? <span>{leaveIn < 60 ? `יציאה בעוד ${leaveIn} דק'` : `יציאה ב-${hm(it.dep)}`}</span>

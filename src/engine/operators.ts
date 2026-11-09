@@ -24,6 +24,8 @@ const AGENCY_COLORS: Record<number, string> = {
 export function lineColor(agency: number, rtype: number, routeColor: string) {
   if (routeColor && /^[0-9a-f]{6}$/i.test(routeColor) && routeColor.toUpperCase() !== 'FFFFFF') return '#' + routeColor;
   if (rtype === 2) return AGENCY_COLORS[2];
+  // Tel Aviv Red Line (Tevel) and Jerusalem light rail (CFIR): red, as on the signs
+  if (rtype === 0 && (agency === 22 || agency === 21)) return '#d7262e';
   return AGENCY_COLORS[agency] || '#5a6b7d';
 }
 

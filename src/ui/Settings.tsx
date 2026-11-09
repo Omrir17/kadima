@@ -26,6 +26,16 @@ export default function Settings({ openPicker, dataInfo }: Props) {
         <PlaceRow key={i} icon={<IconStar />} label={f.name} p={f} onClear={() => updateSaved((x) => ({ ...x, favorites: x.favorites.filter((_, j) => j !== i) }))} />
       ))}
 
+      <h2 className="sec-h">אמצעי תחבורה</h2>
+      <p className="muted small">מה מותר לכלול במסלולים:</p>
+      <div className="toggles">
+        {([['noBus', 'אוטובוסים'], ['noTrain', 'רכבות'], ['noLightRail', 'רכבת קלה וכרמלית']] as const).map(([k, label]) => (
+          <button key={k} className={'toggle' + (st.prefs[k] ? '' : ' on')} aria-pressed={!st.prefs[k]} onClick={() => setPrefs({ [k]: !st.prefs[k] })}>
+            {label}
+          </button>
+        ))}
+      </div>
+
       <h2 className="sec-h">הליכה</h2>
       <Seg label="קצב הליכה" value={st.prefs.walkSpeed} options={[[1.0, 'איטי'], [1.25, 'רגיל'], [1.55, 'מהיר']]} onChange={(v) => setPrefs({ walkSpeed: v })} />
       <Seg label="הליכה מקסימלית לתחנה" value={st.prefs.maxWalk} options={[[500, "500 מ'"], [800, "800 מ'"], [1000, 'ק"מ'], [1500, '1.5 ק"מ']]} onChange={(v) => setPrefs({ maxWalk: v })} />

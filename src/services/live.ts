@@ -22,6 +22,7 @@ function timeWindow(windowSec: number) {
 const cache = new Map<string, { at: number; data: Promise<Vehicle[]> }>();
 
 function parse(rows: any[]): Vehicle[] {
+  // the window holds several snapshots: keep only each bus's newest report
   const byVehicle = new Map<string, Vehicle>();
   for (const r of rows) {
     const jr = String(r.siri_ride__journey_ref || '');
@@ -37,11 +38,11 @@ function parse(rows: any[]): Vehicle[] {
       vehicleRef: String(r.siri_ride__vehicle_ref || jr),
     };
     if (!v.lat || !v.lon) continue;
-    const key = v.vehicleRef + ':' + v.tripRef;
-    const prev = byVehicle.get(key);
-    if (!prev || prev.recordedAt < v.recordedAt) byVehicle.set(key, v);
+    const prev = byVehicle.get(v.vehicleRef);
+    if (!prev || prev.recordedAt < v.recordedAt) byVehicle.set(v.vehicleRef, v);
   }
-  return [...byVehicle.values()];
+  const fresh = Date.now() - 12 * 60e3;
+  return [...byVehicle.values()].filter((v) => v.recordedAt > fresh);
 }
 
 async function fetchJson(url: string, timeoutMs = 10000) {
@@ -56,8 +57,12 @@ async function fetchJson(url: string, timeoutMs = 10000) {
   }
 }
 
-/** Latest positions for one GTFS route (line_ref). Cached for 20s. */
-export function vehiclesForRoute(gtfsRouteId: number, windowSec = 240): Promise<Vehicle[]> {
+/**
+ * Latest positions for one GTFS route (line_ref). Cached for 20s.
+ * The open feed is published ~2-5 minutes late, so we look back 10 minutes and
+ * the planner moves each bus forward along its route (see Planner.vehicleNow).
+ */
+export function vehiclesForRoute(gtfsRouteId: number, windowSec = 600): Promise<Vehicle[]> {
   const key = 'r' + gtfsRouteId;
   const c = cache.get(key);
   if (c && Date.now() - c.at < 20000) return c.data;
@@ -66,13 +71,6 @@ export function vehiclesForRoute(gtfsRouteId: number, windowSec = 240): Promise<
   cache.set(key, { at: Date.now(), data });
   data.catch(() => cache.delete(key));
   return data;
-}
-
-/** All vehicles in a bounding box (used for "buses near me"). */
-export function vehiclesInBox(minLat: number, minLon: number, maxLat: number, maxLon: number, windowSec = 150): Promise<Vehicle[]> {
-  const url = `${BASE}/siri_vehicle_locations/list?limit=1000&${timeWindow(windowSec)}` +
-    `&lat__greater_or_equal=${minLat}&lat__lower_or_equal=${maxLat}&lon__greater_or_equal=${minLon}&lon__lower_or_equal=${maxLon}`;
-  return fetchJson(url).then(parse);
 }
 
 export async function vehiclesForRoutes(ids: number[]): Promise<Vehicle[]> {

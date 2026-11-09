@@ -4,9 +4,9 @@ import { Access, Egress, Raptor, RawLeg, RoundResult } from './raptor';
 import {
   BusCandidate, Departure, Itinerary, Leg, LineVariant, Place, PlanRequest, PlanResponse, Prefs, StopRef, VehicleView,
 } from './model';
-import { daySecToEpoch, epochToDaySec, israelParts, trafficFactor } from './time';
+import { addDays, daySecToEpoch, epochToDaySec, israelParts, trafficFactor } from './time';
 import { trafficRoute } from '../services/tomtom';
-import { estDriveSec, osrmOneToMany, osrmRoute } from '../services/osrm';
+import { estDriveSec, footRoute, osrmOneToMany, osrmRoute } from '../services/osrm';
 import { Vehicle, vehiclesForRoute, vehiclesForRoutes } from '../services/live';
 import { lineColor } from './operators';
 
@@ -31,13 +31,19 @@ interface Ctx {
   t0: number;
   bus?: { pattern: number; trip: number; nextPos: number; delay: number; here: Place };
   rideCoords?: LatLon[];
+  delays?: Map<number, number>; // live delays by trip index
+  banned?: Uint8Array; // patterns excluded by the user's mode preferences
 }
+
+interface PatGeom { pts: LatLon[]; cum: number[]; stopD: number[] }
 
 const HANDOVER = 60; // seconds to get in/out of a car
 
 export class Planner {
   private days = new Map<string, Promise<{ day: Day; raptor: Raptor }>>();
   private fieldCache = new Map<string, { at: number; v: Promise<Map<number, number>> }>();
+  private bannedCache = new Map<string, Uint8Array | undefined>();
+  private geomCache = new Map<string, Promise<PatGeom>>();
 
   constructor(public net: Net, private load: Loader) {}
 
@@ -81,7 +87,21 @@ export class Planner {
   }
 
   private baseCtx(day: Day, raptor: Raptor, prefs: Prefs, t0: number): Ctx {
-    return { day, raptor, acc: [], accInfo: [], eg: [], egInfo: [], prefs, t0 };
+    return { day, raptor, acc: [], accInfo: [], eg: [], egInfo: [], prefs, t0, banned: this.bannedFor(day, prefs) };
+  }
+
+  /** Patterns the user excluded (no buses / no trains / no light rail). */
+  private bannedFor(day: Day, prefs: Prefs): Uint8Array | undefined {
+    if (!prefs.noBus && !prefs.noTrain && !prefs.noLightRail) return undefined;
+    const key = `${day.date}:${+!!prefs.noBus}${+!!prefs.noTrain}${+!!prefs.noLightRail}`;
+    if (this.bannedCache.has(key)) return this.bannedCache.get(key);
+    const b = new Uint8Array(day.nPat);
+    for (let p = 0; p < day.nPat; p++) {
+      const t = this.net.routes[day.patRoute[p]][5];
+      if ((prefs.noBus && (t === 3 || t === 715)) || (prefs.noTrain && t === 2) || (prefs.noLightRail && (t === 0 || t === 5 || t === 8))) b[p] = 1;
+    }
+    this.bannedCache.set(key, b);
+    return b;
   }
 
   private addWalkAccess(ctx: Ctx, from: Place, time: number) {
@@ -104,18 +124,20 @@ export class Planner {
       slack: ctx.prefs.slack,
       walkSpeed: ctx.prefs.walkSpeed,
       maxTime: maxTime ?? ctx.t0 + 5 * 3600,
+      delays: ctx.delays,
+      banned: ctx.banned,
     });
   }
 
   // ---------------------------------------------------------------- itinerary assembly
 
-  private transitLeg(day: Day, l: Extract<RawLeg, { t: 'transit' }>): Leg {
+  private transitLeg(day: Day, l: Extract<RawLeg, { t: 'transit' }>, delay?: number): Leg {
     const net = this.net;
     const r = net.routes[day.patRoute[l.pat]];
     const stops: StopRef[] = [];
     for (let i = l.board; i <= l.alight; i++) {
       const s = patStop(day, l.pat, i);
-      stops.push({ stop: s, name: net.stops.name[s], lat: net.stops.lat[s], lon: net.stops.lon[s], code: net.stops.code[s], t: tripTime(day, l.trip, i) });
+      stops.push({ stop: s, name: net.stops.name[s], lat: net.stops.lat[s], lon: net.stops.lon[s], code: net.stops.code[s], t: tripTime(day, l.trip, i) + (delay ?? 0) });
     }
     return {
       kind: 'transit',
@@ -138,6 +160,7 @@ export class Planner {
       alight: l.alight,
       stops,
       shape: day.patShape[l.pat],
+      ...(delay !== undefined ? { live: true, delay } : {}),
     };
   }
 
@@ -147,7 +170,7 @@ export class Planner {
     let accessLeg: RawLeg | null = null;
     for (const l of res.legs) {
       if (l.t === 'access') accessLeg = l;
-      else if (l.t === 'transit') legs.push(this.transitLeg(day, l));
+      else if (l.t === 'transit') legs.push(this.transitLeg(day, l, ctx.delays?.get(l.trip)));
       else legs.push({ kind: 'walk', from: this.stopPlace(l.from), to: this.stopPlace(l.to), dep: l.dep, arr: l.arr, dist: l.dist });
     }
     const firstTransit = legs.find((l) => l.kind === 'transit');
@@ -274,28 +297,95 @@ export class Planner {
       if (latest === null) return { date, itineraries: [], note: 'לא נמצא מסלול שמגיע בזמן' };
       t = latest;
     }
+    // real-time: learn how late the buses around me are, then plan with real times
+    let delays: Map<number, number> | undefined;
+    if (req.live && !req.arriveBy) {
+      try {
+        const quick = this.transitRuns(day, raptor, req, t, undefined, 2);
+        delays = await this.liveDelaysAround(day, date, from, t, req.prefs, quick);
+      } catch { /* plan without live data */ }
+    }
+    let its = this.transitRuns(day, raptor, req, t, delays, 5);
+    if (req.arriveBy) its = its.filter((x) => x.arr <= sec + 60);
+    // late at night: also show tomorrow's first departures
+    const next = addDays(date, 1);
+    if (!req.arriveBy && t > 20 * 3600 && its.length < 4 && this.net.days.includes(next)) {
+      try {
+        const nd = await this.getDay(next);
+        // the next day's file also holds tonight's trips that run past midnight: skip those we already have
+        const have = new Set(its.map((x) => x.id));
+        const more = this.transitRuns(nd.day, nd.raptor, req, t - 86400, undefined, 3).filter((m) => !have.has(m.id));
+        for (const m of more) m.tags = m.tags.filter((x) => x !== 'הכי מהיר').concat(m.dep >= 0 ? ['אחרי חצות'] : []);
+        its = its.concat(more.slice(0, 4 - its.length));
+      } catch { /* no data for tomorrow */ }
+    }
+    const today = its.filter((x) => x.date === date);
+    const walk = this.walkOnly(from, to, t, req.prefs, date);
+    if (walk && (today.length === 0 || walk.arr <= Math.min(...today.map((x) => x.arr)) + 10 * 60)) its.push(walk);
+    let note: string | undefined;
+    if (!its.length) note = israelParts(req.time ?? Date.now()).weekday === 6 ? 'אין תחבורה ציבורית בשבת בשעות האלו' : 'לא נמצא מסלול';
+    return { date, itineraries: its, note, live: !!delays && delays.size > 0 };
+  }
+
+  /**
+   * Several RAPTOR runs at successive departure times ("range" search) so the user gets
+   * real alternatives (later buses, fewer transfers, less walking), then a Pareto filter.
+   */
+  private transitRuns(day: Day, raptor: Raptor, req: PlanRequest, t: number, delays: Map<number, number> | undefined, runs: number): Itinerary[] {
     const results: Itinerary[] = [];
     let runAt = t;
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < runs; i++) {
       const ctx = this.baseCtx(day, raptor, req.prefs, runAt);
-      this.addWalkAccess(ctx, from, runAt);
-      this.addWalkEgress(ctx, to);
+      ctx.delays = delays;
+      this.addWalkAccess(ctx, req.from!, runAt);
+      this.addWalkEgress(ctx, req.to);
       const rs = this.run(ctx);
       if (!rs.length) break;
       const its = rs.map((r) => this.build(ctx, r));
       results.push(...its);
-      const firstBoard = Math.min(...its.map((it) => it.legs.find((l) => l.kind === 'transit')?.dep ?? Infinity));
-      if (!isFinite(firstBoard)) break;
-      runAt = firstBoard - (its[0].legs[0].kind === 'walk' ? its[0].legs[0].arr - its[0].legs[0].dep : 0) + 60;
+      // next run: just after the earliest departure we found, so the next bus shows up
+      const leaves = its.filter((it) => it.legs.some((l) => l.kind === 'transit')).map((it) => it.dep);
+      if (!leaves.length) break;
+      runAt = Math.max(runAt + 60, Math.min(...leaves) + 60);
       if (req.arriveBy) break;
     }
-    const walk = this.walkOnly(from, to, t, req.prefs, date);
-    let its = this.pareto(results, 5);
-    if (req.arriveBy) its = its.filter((x) => x.arr <= sec + 60);
-    if (walk && (its.length === 0 || walk.arr <= Math.min(...its.map((x) => x.arr)) + 10 * 60)) its.push(walk);
-    let note: string | undefined;
-    if (!its.length) note = israelParts(req.time ?? Date.now()).weekday === 6 ? 'אין תחבורה ציבורית בשבת בשעות האלו' : 'לא נמצא מסלול';
-    return { date, itineraries: its, note };
+    return this.pareto(results, 6);
+  }
+
+  /**
+   * Fetches live positions for the lines I could take soon (and the lines of a quick plan)
+   * and turns them into per-trip delays for the router.
+   */
+  private async liveDelaysAround(day: Day, date: string, from: Place, t: number, prefs: Prefs, quick: Itinerary[]) {
+    const routeFirst = new Map<number, number>(); // route -> earliest departure near me
+    for (const w of this.walkAccess(from, prefs, 40)) {
+      for (let j = day.spOff[w.stop]; j < day.spOff[w.stop + 1]; j++) {
+        const p = day.spPat[j], pos = day.spPos[j];
+        const t0 = day.patTripOff[p], t1 = day.patTripOff[p + 1];
+        let lo = t0, hi = t1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (tripTime(day, mid, pos) >= t - 15 * 60) hi = mid; else lo = mid + 1;
+        }
+        if (lo >= t1) continue;
+        const dep = tripTime(day, lo, pos);
+        if (dep > t + 45 * 60) continue;
+        const r = day.patRoute[p];
+        if (!routeFirst.has(r) || dep < routeFirst.get(r)!) routeFirst.set(r, dep);
+      }
+    }
+    const routes = new Set<number>([...routeFirst].sort((a, b) => a[1] - b[1]).slice(0, 14).map(([r]) => r));
+    for (const it of quick) for (const l of it.legs) if (l.route !== undefined) routes.add(l.route);
+    const ids = [...routes].slice(0, 22).map((r) => this.net.routes[r][0]);
+    const vs = await vehiclesForRoutes(ids);
+    const delays = new Map<number, number>();
+    for (const v of vs) {
+      const trip = day.tripByRef.get(v.tripRef);
+      if (trip === undefined) continue;
+      const est = this.vehicleProgress(day, trip, v, date);
+      if (est) delays.set(trip, Math.max(-10 * 60, Math.min(40 * 60, est.delay)));
+    }
+    return delays;
   }
 
   private async latestDeparture(day: Day, raptor: Raptor, req: PlanRequest, arriveBy: number) {
@@ -461,11 +551,11 @@ export class Planner {
       if (out.length >= max) break;
     }
     // always show the best plan that actually uses the car, even when plain transit wins
-    if (!out.some((o) => carSec(o) > 0)) {
-      const bestCar = arr.find((o) => carSec(o) > 0);
+    if (!out.some(hasCar)) {
+      const bestCar = arr.find(hasCar);
       if (bestCar) out.push(bestCar);
     }
-    for (const o of out) if (carSec(o) === 0 && !o.tags.includes('ברגל')) o.tags.push('בלי רכב');
+    for (const o of out) if (!hasCar(o) && !o.tags.includes('ברגל')) o.tags.push('בלי רכב');
     if (out.length) {
       out[0].tags.push('מומלץ');
       const fastest = out.reduce((a, b) => (b.arr < a.arr ? b : a));
@@ -880,11 +970,91 @@ export class Planner {
     return { delay: Math.round(rec - sched), pos: i + best.frac };
   }
 
+  /** Stop coordinates mapped onto the route shape, for placing buses along real roads. */
+  private patternGeom(day: Day, p: number): Promise<PatGeom> {
+    const key = day.date + ':' + p;
+    let g = this.geomCache.get(key);
+    if (!g) {
+      g = (async () => {
+        const n = patLen(day, p);
+        const stops: LatLon[] = [];
+        for (let i = 0; i < n; i++) { const s = patStop(day, p, i); stops.push([this.net.lat[s], this.net.lon[s]]); }
+        const sh = day.patShape[p] >= 0 ? await this.shapeCoords(day.patShape[p]) : null;
+        const pts = sh && sh.length > 1 ? sh : stops;
+        const cum = [0];
+        for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + distM(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]));
+        const stopD: number[] = [];
+        let seg = 0;
+        for (const [la, lo] of stops) {
+          // search forward only, so loops in the route don't confuse the mapping
+          let best = { d: Infinity, at: cum[seg], k: seg };
+          for (let k = seg; k < Math.min(pts.length - 1, seg + 600); k++) {
+            const pr = projectOnLine([pts[k], pts[k + 1]], la, lo);
+            if (pr.dist < best.d) best = { d: pr.dist, at: cum[k] + pr.frac * (cum[k + 1] - cum[k]), k };
+            if (best.d < 15 && pr.dist > 400) break;
+          }
+          seg = best.k;
+          stopD.push(Math.max(best.at, stopD.length ? stopD[stopD.length - 1] : 0));
+        }
+        return { pts, cum, stopD };
+      })();
+      this.geomCache.set(key, g);
+      if (this.geomCache.size > 400) this.geomCache.delete(this.geomCache.keys().next().value as string);
+    }
+    return g;
+  }
+
+  /**
+   * Where the bus is *now*. The feed is minutes old, so we move the bus forward
+   * along its route at the scheduled pace, keeping its measured delay.
+   */
+  async vehicleNow(day: Day, trip: number, v: Vehicle, date: string): Promise<{ lat: number; lon: number; bearing: number; pos: number; delay: number } | null> {
+    const est = this.vehicleProgress(day, trip, v, date);
+    if (!est) return null;
+    const p = day.tripPat[trip];
+    const n = patLen(day, p);
+    const tau = epochToDaySec(Date.now(), date) - est.delay; // the schedule time the bus is at now
+    if (tau - tripTime(day, trip, n - 1) > 120) return null; // trip finished
+    let i = 0;
+    while (i < n - 1 && tripTime(day, trip, i + 1) <= tau) i++;
+    let pos = i;
+    if (i < n - 1) {
+      const a = tripTime(day, trip, i), b = tripTime(day, trip, i + 1);
+      pos = i + (b > a ? Math.max(0, Math.min(1, (tau - a) / (b - a))) : 0);
+    }
+    pos = Math.min(n - 1, Math.max(pos, est.pos)); // never move a bus backwards
+    const g = await this.patternGeom(day, p);
+    const k = Math.min(n - 2, Math.floor(pos));
+    const d = g.stopD[k] + (pos - k) * (g.stopD[k + 1] - g.stopD[k]);
+    const pt = pointAt(g, d);
+    if (distM(pt[0], pt[1], v.lat, v.lon) > 4000) return { lat: v.lat, lon: v.lon, bearing: v.bearing, pos: est.pos, delay: est.delay };
+    return { lat: pt[0], lon: pt[1], bearing: pt[2], pos, delay: est.delay };
+  }
+
+  private async vehicleView(day: Day, date: string, trip: number, v: Vehicle): Promise<VehicleView | null> {
+    const now = await this.vehicleNow(day, trip, v, date);
+    if (!now) return null;
+    const p = day.tripPat[trip];
+    const r = this.net.routes[day.patRoute[p]];
+    const next = patStop(day, p, Math.min(patLen(day, p) - 1, Math.ceil(now.pos)));
+    return {
+      lat: now.lat, lon: now.lon, bearing: now.bearing, line: r[1] || 'רכבת', color: lineColor(r[4], r[5], r[6]), delay: now.delay,
+      ageSec: Math.round((Date.now() - v.recordedAt) / 1000), tripRef: v.tripRef, trip, route: day.patRoute[p], rtype: r[5],
+      headsign: this.net.headsigns[day.patHead[p]] || r[3], nextStop: this.net.stops.name[next], pos: now.pos,
+    };
+  }
+
   async departures(stop: number, timeMs?: number, horizonMin = 90, withLive = true): Promise<Departure[]> {
+    return (await this.stopBoard(stop, timeMs, horizonMin, withLive)).deps;
+  }
+
+  /** Departures from a stop (live where available) plus the approaching buses for the map. */
+  async stopBoard(stop: number, timeMs?: number, horizonMin = 90, withLive = true): Promise<{ deps: Departure[]; vehicles: VehicleView[] }> {
     const { date, sec } = this.when({ time: timeMs } as PlanRequest);
     const { day } = await this.getDay(date);
     const net = this.net;
     const out: Departure[] = [];
+    const vehicles: VehicleView[] = [];
     for (let j = day.spOff[stop]; j < day.spOff[stop + 1]; j++) {
       const p = day.spPat[j], pos = day.spPos[j];
       const n = patLen(day, p);
@@ -908,46 +1078,54 @@ export class Planner {
     }
     if (withLive && out.length) {
       try {
-        const vs = await vehiclesForRoutes([...new Set(out.map((d) => d.gtfsRoute))].slice(0, 16));
+        // live data for the lines with the soonest departures
+        const soon = [...out].sort((a, b) => a.time - b.time);
+        const ids: number[] = [];
+        for (const d of soon) if (!ids.includes(d.gtfsRoute)) ids.push(d.gtfsRoute);
+        const vs = await vehiclesForRoutes(ids.slice(0, 16));
         const byRef = new Map<number, Vehicle>();
         for (const v of vs) byRef.set(v.tripRef, v);
-        for (const d of out) {
+        await Promise.all(out.map(async (d) => {
           const v = byRef.get(d.tripRef);
-          if (!v) continue;
-          const est = this.vehicleProgress(day, d.trip, v, date);
-          if (!est) continue;
-          if (est.pos > d.pos + 0.2) { d.time = -1; continue; } // already passed
-          d.time = d.sched + est.delay;
+          if (!v) return;
+          const now = await this.vehicleNow(day, d.trip, v, date);
+          if (!now) return;
+          if (now.pos > d.pos + 0.15) { d.time = -1; return; } // already passed this stop
+          d.time = d.sched + now.delay;
           d.live = true;
-        }
-      } catch { /* ignore */ }
+          d.stopsAway = Math.max(0, Math.ceil(d.pos - now.pos - 0.15));
+          if (d.time - sec < 40 * 60) {
+            const vv = await this.vehicleView(day, date, d.trip, v);
+            if (vv) vehicles.push(vv);
+          }
+        }));
+      } catch { /* live data is optional */ }
     }
-    return out.filter((d) => d.time >= sec - 60 && (d.live || d.time >= sec - 30)).sort((a, b) => a.time - b.time).slice(0, 60);
+    const deps = out.filter((d) => d.time >= sec - 60 && (d.live || d.time >= sec - 30)).sort((a, b) => a.time - b.time).slice(0, 60);
+    return { deps, vehicles };
   }
 
-  async liveForLeg(date: string, trip: number, gtfsRoute: number): Promise<{ delay: number; pos: number; v: VehicleView } | null> {
+  async liveForLeg(date: string, trip: number, gtfsRoute: number, boardPos?: number): Promise<{ delay: number; pos: number; stopsAway?: number; v: VehicleView } | null> {
     const { day } = await this.getDay(date);
     const vs = await vehiclesForRoute(gtfsRoute);
     const v = vs.find((x) => x.tripRef === day.tripRef[trip]);
     if (!v) return null;
-    const est = this.vehicleProgress(day, trip, v, date);
-    if (!est) return null;
-    const r = this.net.routes[day.patRoute[day.tripPat[trip]]];
-    return {
-      delay: est.delay, pos: est.pos,
-      v: { lat: v.lat, lon: v.lon, bearing: v.bearing, line: r[1], color: lineColor(r[4], r[5], r[6]), delay: est.delay, ageSec: Math.round((Date.now() - v.recordedAt) / 1000), tripRef: v.tripRef },
-    };
+    const vv = await this.vehicleView(day, date, trip, v);
+    if (!vv) return null;
+    const stopsAway = boardPos !== undefined && vv.pos! <= boardPos + 0.15 ? Math.max(0, Math.ceil(boardPos - vv.pos! - 0.15)) : undefined;
+    return { delay: vv.delay ?? 0, pos: vv.pos!, stopsAway, v: vv };
   }
 
   async vehiclesOnRoute(date: string, route: number): Promise<VehicleView[]> {
     const { day } = await this.getDay(date);
     const r = this.net.routes[route];
     const vs = await vehiclesForRoute(r[0]);
-    return vs.map((v) => {
+    const out = await Promise.all(vs.map(async (v) => {
       const t = day.tripByRef.get(v.tripRef);
-      const est = t !== undefined ? this.vehicleProgress(day, t, v, date) : null;
-      return { lat: v.lat, lon: v.lon, bearing: v.bearing, line: r[1], color: lineColor(r[4], r[5], r[6]), delay: est?.delay, ageSec: Math.round((Date.now() - v.recordedAt) / 1000), tripRef: v.tripRef };
-    });
+      if (t === undefined) return null;
+      return this.vehicleView(day, date, t, v);
+    }));
+    return out.filter((x): x is VehicleView => !!x);
   }
 
   // ---------------------------------------------------------------- search & geometry
@@ -995,7 +1173,7 @@ export class Planner {
     return res;
   }
 
-  async searchLines(q: string): Promise<LineVariant[]> {
+  async searchLines(q: string, near?: LatLon): Promise<LineVariant[]> {
     const { date } = this.when({} as PlanRequest);
     const { day } = await this.getDay(date);
     const net = this.net;
@@ -1005,9 +1183,18 @@ export class Planner {
     for (const [ri, pats] of day.routePats) {
       const r = net.routes[ri];
       if (r[1] !== qq) continue;
-      out.push({ route: ri, gtfsRoute: r[0], line: r[1], agency: r[4], agencyName: net.agencies[r[4]] || '', rtype: r[5], from: r[2], to: r[3], patterns: pats, color: lineColor(r[4], r[5], r[6]) });
+      // distance from me to the closest stop on this line (nearest lines first, like other apps)
+      let distM_ = Infinity;
+      if (near) {
+        for (const p of pats) for (let i = 0; i < patLen(day, p); i++) {
+          const st = patStop(day, p, i);
+          const d = distM(near[0], near[1], net.lat[st], net.lon[st]);
+          if (d < distM_) distM_ = d;
+        }
+      }
+      out.push({ route: ri, gtfsRoute: r[0], line: r[1], agency: r[4], agencyName: net.agencies[r[4]] || '', rtype: r[5], from: r[2], to: r[3], patterns: pats, color: lineColor(r[4], r[5], r[6]), distM: isFinite(distM_) ? Math.round(distM_) : undefined });
     }
-    out.sort((a, b) => a.agency - b.agency || a.from.localeCompare(b.from));
+    out.sort((a, b) => (a.distM ?? 0) - (b.distM ?? 0) || a.agency - b.agency || a.from.localeCompare(b.from));
     return out;
   }
 
@@ -1068,10 +1255,28 @@ export class Planner {
             out.push((await osrmRoute(pts)).coords);
           } catch { out.push([a, b]); }
         }
+      } else if (l.kind === 'walk' && (l.dist ?? 0) > 60) {
+        try { out.push(await footRoute(a, b)); } catch { out.push([a, b]); }
       } else out.push([a, b]);
     }
     return out;
   }
+}
+
+/** Point (and heading) at distance d along a pattern's geometry. */
+function pointAt(g: PatGeom, d: number): [number, number, number] {
+  const { pts, cum } = g;
+  let lo = 0, hi = cum.length - 1;
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (cum[mid] <= d) lo = mid; else hi = mid;
+  }
+  const a = pts[lo], b = pts[Math.min(pts.length - 1, lo + 1)];
+  const seg = cum[Math.min(cum.length - 1, lo + 1)] - cum[lo];
+  const f = seg > 0 ? Math.max(0, Math.min(1, (d - cum[lo]) / seg)) : 0;
+  const lat = a[0] + (b[0] - a[0]) * f, lon = a[1] + (b[1] - a[1]) * f;
+  const brg = (Math.atan2((b[1] - a[1]) * Math.cos((lat * Math.PI) / 180), b[0] - a[0]) * 180) / Math.PI;
+  return [lat, lon, (brg + 360) % 360];
 }
 
 /** Joins consecutive walking legs (stop-to-stop transfer + final walk) into one. */
@@ -1092,6 +1297,10 @@ function mergeWalks(legs: Leg[], prefs: Prefs): Leg[] {
 function hmLocal(sec: number) {
   const m = Math.round(sec / 60);
   return `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+}
+
+function hasCar(it: Itinerary) {
+  return it.legs.some((l) => l.kind === 'car');
 }
 
 function carSec(it: Itinerary) {
